@@ -3,6 +3,7 @@
  */
 
 import type { OEmbedResponse } from "../types.ts";
+import { MIN_RECIPE_CAPTION_LENGTH, MIN_RECIPE_KEYWORD_MATCHES } from "../constants.ts";
 
 const TIKTOK_OEMBED_ENDPOINT = "https://www.tiktok.com/oembed";
 
@@ -79,7 +80,7 @@ export function extractCaption(oembedData: OEmbedResponse): string | null {
  * - Length (recipes tend to be longer than typical captions)
  */
 export function looksLikeRecipe(caption: string): boolean {
-  if (!caption || caption.trim().length < 20) {
+  if (!caption || caption.trim().length < MIN_RECIPE_CAPTION_LENGTH) {
     console.log('[oEmbed] Caption too short to be a recipe');
     return false;
   }
@@ -99,8 +100,8 @@ export function looksLikeRecipe(caption: string): boolean {
   const keywordMatches = recipeKeywords.filter(keyword => lower.includes(keyword));
   const matchCount = keywordMatches.length;
 
-  // If we have 3+ recipe keywords, it's likely a recipe
-  const isRecipe = matchCount >= 3;
+  // Determine if this looks like a recipe based on keyword threshold
+  const isRecipe = matchCount >= MIN_RECIPE_KEYWORD_MATCHES;
 
   console.log(`[oEmbed] Recipe heuristic: ${matchCount} keywords found`, {
     isRecipe,

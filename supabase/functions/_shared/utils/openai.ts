@@ -3,6 +3,7 @@
  */
 
 import type { Recipe } from "../types.ts";
+import { OPENAI_TEMPERATURE, OPENAI_MODEL_DEFAULT } from "../constants.ts";
 
 const OPENAI_API_ENDPOINT = "https://api.openai.com/v1/chat/completions";
 
@@ -119,7 +120,7 @@ VALIDATION
 export async function normalizeRecipe(
   input: NormalizeInput,
   apiKey: string,
-  model = "gpt-4o-mini"
+  model = OPENAI_MODEL_DEFAULT
 ): Promise<NormalizeResult> {
   const startTime = performance.now();
 
@@ -148,7 +149,7 @@ export async function normalizeRecipe(
           { role: "user", content: userPrompt },
         ],
         response_format: { type: "json_object" },
-        temperature: 0.1, // Low temperature for consistency
+        temperature: OPENAI_TEMPERATURE,
       }),
     });
 

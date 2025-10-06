@@ -93,8 +93,27 @@ Deno.serve(async (req) => {
 
     const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-    // Parse request body
-    const payload: ApifyWebhookPayload = await req.json();
+    // Parse and validate request body
+    let payload: ApifyWebhookPayload;
+    try {
+      payload = await req.json();
+    } catch (error) {
+      console.error(`[${requestId}] ✗ Invalid JSON in webhook payload:`, error);
+      return new Response(
+        JSON.stringify({ error: "Invalid JSON payload" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate payload structure
+    if (!payload || typeof payload !== 'object') {
+      console.error(`[${requestId}] ✗ Payload is not an object`);
+      return new Response(
+        JSON.stringify({ error: "Payload must be an object" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
     console.log(`[${requestId}] Webhook payload:`, {
       datasetId: payload.datasetId,
       actorRunId: payload.actorRunId,
