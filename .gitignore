@@ -1,0 +1,33 @@
+# Supabase
+.branches
+.temp
+.env
+.env.local
+
+# Secrets
+*.key
+*.pem
+secrets/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Dependencies (if any)
+node_modules/
+.deno/
+
+# Build outputs
+dist/
+build/
