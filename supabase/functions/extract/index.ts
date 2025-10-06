@@ -1,10 +1,11 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
-import { createClient } from "@supabase/supabase-js";
-import type { ExtractRequest, ExtractResponse, CacheRow, CacheStatus } from "../_shared/types.ts";
-import { extractTikTokVideoId, isValidTikTokUrl } from "../_shared/utils/tiktok.ts";
+import type { ExtractRequest, ExtractResponse, CacheStatus } from "../_shared/types.ts";
+import { isValidTikTokUrl } from "../_shared/utils/tiktok.ts";
 import { fetchOEmbed, extractCaption, shouldNormalizeFromCaption } from "../_shared/utils/oembed.ts";
 import { normalizeRecipe } from "../_shared/utils/openai.ts";
 import { triggerApifyActor, buildWebhookUrl } from "../_shared/utils/apify.ts";
+import { handleCorsPreflight, validateMethod, jsonResponse, jsonError } from "../_shared/utils/http.ts";
+import { getSupabaseClient, getRequiredEnv } from "../_shared/utils/supabase.ts";
 
 /**
  * POST /extract
@@ -27,24 +28,15 @@ Deno.serve(async (req) => {
   console.log(`[${requestId}] ========== NEW REQUEST ==========`);
   console.log(`[${requestId}] Method: ${req.method}, URL: ${req.url}`);
 
-  // CORS headers
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-  };
+  // Handle CORS preflight
+  const preflightResponse = handleCorsPreflight(req);
+  if (preflightResponse) return preflightResponse;
 
-  // Handle OPTIONS for CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders, status: 204 });
-  }
-
-  // Only allow POST
-  if (req.method !== "POST") {
+  // Validate method
+  const methodError = validateMethod(req, "POST");
+  if (methodError) {
     console.log(`[${requestId}] ✗ Method not allowed: ${req.method}`);
-    return new Response(
-      JSON.stringify({ error: "Method not allowed" }),
-      { status: 405, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+    return methodError;
   }
 
   try {
@@ -54,10 +46,7 @@ Deno.serve(async (req) => {
 
     if (!body.url) {
       console.log(`[${requestId}] ✗ Missing URL in request`);
-      return new Response(
-        JSON.stringify({ error: "Missing 'url' field in request body" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+      return jsonError("Missing 'url' field in request body", 400);
     }
 
     // Quick validation: is it a TikTok URL?

@@ -49,7 +49,6 @@ export async function triggerApifyActor(
       videos: [input.videoUrl],
       customData: {
         videoKey: input.key,
-        webhookSecret: input.webhookUrl.split('secret=')[1]?.split('&')[0],
       }
     };
 

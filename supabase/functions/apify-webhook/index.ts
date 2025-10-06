@@ -79,6 +79,20 @@ Deno.serve(async (req) => {
 
     console.log(`[${requestId}] ✓ Webhook secret verified`);
 
+    // Initialize Supabase client early (needed for error paths)
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+    if (!supabaseUrl || !supabaseServiceKey) {
+      console.error(`[${requestId}] ✗ Missing Supabase credentials`);
+      return new Response(
+        JSON.stringify({ error: "Server configuration error" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
     // Parse request body
     const payload: ApifyWebhookPayload = await req.json();
     console.log(`[${requestId}] Webhook payload:`, {
@@ -87,7 +101,7 @@ Deno.serve(async (req) => {
     });
     console.log(`[${requestId}] Full payload:`, JSON.stringify(payload));
 
-    // Fetch dataset results from Apify
+    // Get Apify token
     const apifyToken = Deno.env.get("APIFY_TOKEN");
     if (!apifyToken) {
       console.error(`[${requestId}] ✗ Missing APIFY_TOKEN`);
@@ -149,7 +163,8 @@ Deno.serve(async (req) => {
     if (!datasetResponse.ok) {
       const errorText = await datasetResponse.text();
       console.error(`[${requestId}] ✗ Failed to fetch dataset: ${datasetResponse.status}`);
-      console.error(`[${requestId}] Dataset URL (token redacted):`, datasetUrl.replace(apifyToken || '', 'REDACTED'));
+      const sanitizedUrl = datasetUrl.replace(/token=[^&]+/, 'token=REDACTED');
+      console.error(`[${requestId}] Dataset URL (token redacted):`, sanitizedUrl);
       console.error(`[${requestId}] Error response:`, errorText);
       return new Response(
         JSON.stringify({
@@ -249,27 +264,21 @@ Deno.serve(async (req) => {
     if (!caption && !transcript) {
       console.error(`[${requestId}] ✗ No caption or transcript in dataset`);
 
-      // Initialize Supabase to update cache with error
-      const supabaseUrl = Deno.env.get("SUPABASE_URL");
-      const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-      if (supabaseUrl && supabaseServiceKey) {
-        const supabase = createClient(supabaseUrl, supabaseServiceKey);
-        await supabase
-          .from("cache")
-          .upsert({
-            key,
-            status: "FAILED" as CacheStatus,
-            error: {
-              type: "apify_no_content",
-              message: "Apify returned no caption or transcript",
-            },
-            meta: {
-              actorRunId: payload.actorRunId,
-              source_url: payload.source_url,
-            },
-          });
-      }
+      // Update cache with error (supabase client already initialized)
+      await supabase
+        .from("cache")
+        .upsert({
+          key,
+          status: "FAILED" as CacheStatus,
+          error: {
+            type: "apify_no_content",
+            message: "Apify returned no caption or transcript",
+          },
+          meta: {
+            actorRunId: payload.actorRunId,
+            source_url: payload.source_url,
+          },
+        });
 
       return new Response(
         JSON.stringify({ error: "No content to process" }),
@@ -277,21 +286,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Initialize Supabase client
-    const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-    if (!supabaseUrl || !supabaseServiceKey) {
-      console.error(`[${requestId}] ✗ Missing Supabase credentials`);
-      return new Response(
-        JSON.stringify({ error: "Server configuration error" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-    // Check if already processed (idempotency check)
+    // Check if already processed (idempotency check - supabase client already initialized)
     const { data: existing } = await supabase
       .from("cache")
       .select("status, meta")
