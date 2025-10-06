@@ -234,6 +234,12 @@ Deno.serve(async (req) => {
               timings: {
                 openai_ms: normalizeResult.elapsed_ms,
               },
+              author,
+              author_url: oembedData.author_url,
+              creator_handle: oembedData.author_unique_id,
+              thumbnail_url: thumbnailUrl,
+              thumbnail_width: oembedData.thumbnail_width,
+              thumbnail_height: oembedData.thumbnail_height,
             },
           });
 
@@ -312,6 +318,12 @@ Deno.serve(async (req) => {
             source_url: body.url,
             caption,
             actorRunId: apifyResult.actorRunId,
+            author,
+            author_url: oembedData.author_url,
+            creator_handle: oembedData.author_unique_id,
+            thumbnail_url: thumbnailUrl,
+            thumbnail_width: oembedData.thumbnail_width,
+            thumbnail_height: oembedData.thumbnail_height,
           },
         });
 

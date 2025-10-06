@@ -81,6 +81,7 @@ export interface CacheMeta {
   caption?: string;
   transcript?: string;
   actorRunId?: string;
+  datasetId?: string;
   timings?: {
     oembed_ms?: number;
     openai_ms?: number;
@@ -88,6 +89,12 @@ export interface CacheMeta {
   };
   model?: string;
   source?: "caption" | "transcript";
+  author?: string;
+  author_url?: string;
+  creator_handle?: string;
+  thumbnail_url?: string;
+  thumbnail_width?: number;
+  thumbnail_height?: number;
 }
 
 export interface CacheError {

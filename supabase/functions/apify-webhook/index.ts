@@ -1,8 +1,22 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
-import type { ApifyWebhookPayload, CacheStatus } from "../_shared/types.ts";
+import type { ApifyWebhookPayload, CacheMeta, CacheStatus } from "../_shared/types.ts";
 import { normalizeRecipe } from "../_shared/utils/openai.ts";
 import { verifyWebhookSecret } from "../_shared/utils/apify.ts";
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" ? value : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
 
 /**
  * POST /apify-webhook?key=VIDEO_ID&secret=WEBHOOK_SECRET
@@ -160,10 +174,12 @@ Deno.serve(async (req) => {
       );
     }
 
-    console.log(`[${requestId}] First dataset item keys:`, Object.keys(firstItem));
+    const firstItemRecord = asRecord(firstItem) ?? {};
+
+    console.log(`[${requestId}] First dataset item keys:`, Object.keys(firstItemRecord));
 
     // Extract key from dataset (the actor returns {id, url, transcript})
-    const key = firstItem.id;
+    const key = asString(firstItemRecord["id"]) || asString(firstItemRecord["videoId"]) || asString(firstItemRecord["key"]);
     if (!key) {
       console.error(`[${requestId}] ✗ No video ID in dataset`);
       return new Response(
@@ -176,8 +192,51 @@ Deno.serve(async (req) => {
 
     // This actor returns: { id, url, transcript }
     // transcript is in WebVTT format
-    const caption = firstItem.caption || firstItem.text || firstItem.description || null;
-    const transcript = firstItem.transcript || firstItem.subtitles || firstItem.videoTranscript || null;
+    const caption = asString(firstItemRecord["caption"]) || asString(firstItemRecord["text"]) || asString(firstItemRecord["description"]) || null;
+    const transcript = asString(firstItemRecord["transcript"]) || asString(firstItemRecord["subtitles"]) || asString(firstItemRecord["videoTranscript"]) || null;
+
+    const authorObj = asRecord(firstItemRecord["author"]) || asRecord(firstItemRecord["authorMeta"]);
+    const covers = asRecord(firstItemRecord["covers"]);
+
+    const datasetAuthor =
+      asString(firstItemRecord["authorName"]) ||
+      asString(firstItemRecord["author"]) ||
+      asString(firstItemRecord["creator"]) ||
+      asString(firstItemRecord["nickname"]) ||
+      asString(authorObj?.["name"]) ||
+      asString(authorObj?.["nickname"]);
+
+    const datasetCreatorHandle =
+      asString(firstItemRecord["authorUniqueId"]) ||
+      asString(firstItemRecord["creatorHandle"]) ||
+      asString(authorObj?.["uniqueId"]) ||
+      asString(authorObj?.["id"]);
+
+    const datasetAuthorUrl =
+      asString(firstItemRecord["authorUrl"]) ||
+      asString(firstItemRecord["authorLink"]) ||
+      asString(authorObj?.["url"]) ||
+      asString(authorObj?.["profileUrl"]);
+
+    const datasetThumbnailUrl =
+      asString(firstItemRecord["thumbnailUrl"]) ||
+      asString(firstItemRecord["cover"]) ||
+      asString(firstItemRecord["videoCover"]) ||
+      asString(firstItemRecord["dynamicCover"]) ||
+      asString(firstItemRecord["coverUrl"]) ||
+      asString(covers?.["origin"]) ||
+      asString(covers?.["dynamic"]) ||
+      asString(covers?.["static"]);
+
+    const datasetThumbnailWidth =
+      asNumber(firstItemRecord["thumbnailWidth"]) ||
+      asNumber(firstItemRecord["width"]) ||
+      asNumber(covers?.["width"]);
+
+    const datasetThumbnailHeight =
+      asNumber(firstItemRecord["thumbnailHeight"]) ||
+      asNumber(firstItemRecord["height"]) ||
+      asNumber(covers?.["height"]);
 
     console.log(`[${requestId}] Extracted data:`, {
       hasCaption: !!caption,
@@ -235,9 +294,11 @@ Deno.serve(async (req) => {
     // Check if already processed (idempotency check)
     const { data: existing } = await supabase
       .from("cache")
-      .select("status")
+      .select("status, meta")
       .eq("key", key)
       .maybeSingle();
+
+    const existingMeta = (existing?.meta as CacheMeta | null) ?? {};
 
     if (existing?.status === "READY") {
       console.log(`[${requestId}] ✓ Already processed (status: READY) - skipping`);
@@ -272,16 +333,58 @@ Deno.serve(async (req) => {
     // Normalize recipe with OpenAI
     console.log(`[${requestId}] Normalizing recipe with OpenAI...`);
 
+    const resolvedSourceUrl =
+      payload.source_url ||
+      asString(firstItemRecord["url"]) ||
+      asString(firstItemRecord["videoUrl"]) ||
+      asString(firstItemRecord["href"]) ||
+      existingMeta.source_url ||
+      `https://www.tiktok.com/video/${key}`;
+
+    const author = datasetAuthor || existingMeta.author;
+    const authorUrl = datasetAuthorUrl || existingMeta.author_url;
+    const creatorHandle = datasetCreatorHandle || existingMeta.creator_handle;
+    const thumbnailUrl = datasetThumbnailUrl || existingMeta.thumbnail_url;
+    const thumbnailWidth = datasetThumbnailWidth ?? existingMeta.thumbnail_width;
+    const thumbnailHeight = datasetThumbnailHeight ?? existingMeta.thumbnail_height;
+
     try {
       const normalizeResult = await normalizeRecipe(
         {
           caption,
           transcript,
-          source_url: payload.source_url || `https://www.tiktok.com/video/${key}`,
+          source_url: resolvedSourceUrl,
           video_id: key,
+          author,
+          author_url: authorUrl,
+          creator_handle: creatorHandle,
+          thumbnail_url: thumbnailUrl,
+          thumbnail_width: thumbnailWidth,
+          thumbnail_height: thumbnailHeight,
         },
         openaiKey
       );
+
+      const updatedMeta: CacheMeta = {
+        ...existingMeta,
+        source_url: resolvedSourceUrl,
+        caption,
+        transcript,
+        actorRunId: payload.actorRunId || existingMeta.actorRunId,
+        datasetId: datasetId || existingMeta.datasetId,
+        model: normalizeResult.model,
+        source: "transcript",
+        author,
+        author_url: authorUrl,
+        creator_handle: creatorHandle,
+        thumbnail_url: thumbnailUrl,
+        thumbnail_width: thumbnailWidth,
+        thumbnail_height: thumbnailHeight,
+        timings: {
+          ...existingMeta.timings,
+          openai_ms: normalizeResult.elapsed_ms,
+        },
+      };
 
       // Update cache as READY
       const { error: upsertError } = await supabase
@@ -290,18 +393,7 @@ Deno.serve(async (req) => {
           key,
           status: "READY" as CacheStatus,
           value: normalizeResult.recipe,
-          meta: {
-            source_url: payload.source_url,
-            caption,
-            transcript,
-            actorRunId: payload.actorRunId,
-            datasetId: payload.datasetId,
-            model: normalizeResult.model,
-            source: "transcript",
-            timings: {
-              openai_ms: normalizeResult.elapsed_ms,
-            },
-          },
+          meta: updatedMeta,
         });
 
       if (upsertError) {
