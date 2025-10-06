@@ -38,15 +38,19 @@ export async function triggerApifyActor(
   });
 
   try {
-    // Build actor run endpoint
+    // Webhook is configured in Apify UI (persistent webhook for this actor)
+    // No need to pass webhooks via API
     const endpoint = `${APIFY_API_BASE}/acts/${actorId}/runs?token=${apifyToken}`;
 
     // Build input for the actor
+    // The TikTok transcript actor expects "videos" field
+    // We also pass the key so the webhook can reference it
     const actorInput = {
-      startUrls: [{ url: input.videoUrl }],
-      webhookUrl: input.webhookUrl,
-      videoKey: input.key,
-      // Add any other actor-specific configuration here
+      videos: [input.videoUrl],
+      customData: {
+        videoKey: input.key,
+        webhookSecret: input.webhookUrl.split('secret=')[1]?.split('&')[0],
+      }
     };
 
     const response = await fetch(endpoint, {
@@ -61,7 +65,10 @@ export async function triggerApifyActor(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`[Apify] Failed to trigger actor (${response.status}) after ${elapsed.toFixed(0)}ms:`, errorText);
+      console.error(`[Apify] Failed to trigger actor (${response.status}) after ${elapsed.toFixed(0)}ms:`);
+      console.error(`[Apify] Error response:`, errorText);
+      console.error(`[Apify] Request URL:`, endpoint.substring(0, 200) + '...');
+      console.error(`[Apify] Request body:`, JSON.stringify(actorInput));
       throw new Error(`Apify API error: ${response.status} ${response.statusText}`);
     }
 

@@ -65,33 +65,130 @@ Deno.serve(async (req) => {
 
     console.log(`[${requestId}] ✓ Webhook secret verified`);
 
-    // Extract key from query params
-    const url = new URL(req.url);
-    const key = url.searchParams.get("key");
+    // Parse request body
+    const payload: ApifyWebhookPayload = await req.json();
+    console.log(`[${requestId}] Webhook payload:`, {
+      datasetId: payload.datasetId,
+      actorRunId: payload.actorRunId,
+    });
+    console.log(`[${requestId}] Full payload:`, JSON.stringify(payload));
 
-    if (!key) {
-      console.error(`[${requestId}] ✗ Missing 'key' query parameter`);
+    // Fetch dataset results from Apify
+    const apifyToken = Deno.env.get("APIFY_TOKEN");
+    if (!apifyToken) {
+      console.error(`[${requestId}] ✗ Missing APIFY_TOKEN`);
       return new Response(
-        JSON.stringify({ error: "Missing 'key' parameter" }),
+        JSON.stringify({ error: "Server configuration error" }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    // Try to get dataset ID from payload first (recommended way)
+    let datasetId = payload.datasetId;
+
+    // Fallback: fetch from actor run if not in payload
+    if (!datasetId) {
+      if (!payload.actorRunId) {
+        console.error(`[${requestId}] ✗ No datasetId or actorRunId in webhook payload`);
+        return new Response(
+          JSON.stringify({ error: "Missing datasetId and actorRunId" }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      console.log(`[${requestId}] No datasetId in payload, fetching from actor run: ${payload.actorRunId}`);
+      const runUrl = `https://api.apify.com/v2/actor-runs/${payload.actorRunId}?token=${apifyToken}`;
+      const runResponse = await fetch(runUrl);
+
+      if (!runResponse.ok) {
+        const errorText = await runResponse.text();
+        console.error(`[${requestId}] ✗ Failed to fetch actor run: ${runResponse.status}`);
+        console.error(`[${requestId}] Error:`, errorText);
+        return new Response(
+          JSON.stringify({ error: "Failed to fetch actor run", details: errorText }),
+          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      const runData = await runResponse.json();
+      datasetId = runData.data?.defaultDatasetId;
+
+      if (!datasetId) {
+        console.error(`[${requestId}] ✗ No defaultDatasetId in actor run`);
+        console.error(`[${requestId}] Run data:`, JSON.stringify(runData.data));
+        return new Response(
+          JSON.stringify({ error: "No dataset in actor run" }),
+          { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        );
+      }
+
+      console.log(`[${requestId}] Got datasetId from run: ${datasetId}`);
+    } else {
+      console.log(`[${requestId}] Using datasetId from payload: ${datasetId}`);
+    }
+
+    // Fetch the dataset items
+    console.log(`[${requestId}] Fetching dataset: ${datasetId}`);
+    const datasetUrl = `https://api.apify.com/v2/datasets/${datasetId}/items?token=${apifyToken}`;
+    const datasetResponse = await fetch(datasetUrl);
+
+    if (!datasetResponse.ok) {
+      const errorText = await datasetResponse.text();
+      console.error(`[${requestId}] ✗ Failed to fetch dataset: ${datasetResponse.status}`);
+      console.error(`[${requestId}] Dataset URL (token redacted):`, datasetUrl.replace(apifyToken || '', 'REDACTED'));
+      console.error(`[${requestId}] Error response:`, errorText);
+      return new Response(
+        JSON.stringify({
+          error: "Failed to fetch Apify dataset",
+          status: datasetResponse.status,
+          details: errorText
+        }),
+        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    const datasetItems = await datasetResponse.json();
+    console.log(`[${requestId}] Dataset items count:`, datasetItems.length);
+
+    // Extract caption and transcript from first item
+    const firstItem = datasetItems[0];
+    if (!firstItem) {
+      console.error(`[${requestId}] ✗ Empty dataset`);
+      return new Response(
+        JSON.stringify({ error: "No data in dataset" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
-    console.log(`[${requestId}] Processing webhook for key: ${key}`);
+    console.log(`[${requestId}] First dataset item keys:`, Object.keys(firstItem));
 
-    // Parse request body
-    const payload: ApifyWebhookPayload = await req.json();
-    console.log(`[${requestId}] Payload:`, {
-      hasCaption: !!payload.caption,
-      hasTranscript: !!payload.transcript,
-      captionLength: payload.caption?.length,
-      transcriptLength: payload.transcript?.length,
-      actorRunId: payload.actorRunId,
+    // Extract key from dataset (the actor returns {id, url, transcript})
+    const key = firstItem.id;
+    if (!key) {
+      console.error(`[${requestId}] ✗ No video ID in dataset`);
+      return new Response(
+        JSON.stringify({ error: "No video ID in dataset" }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
+
+    console.log(`[${requestId}] Processing webhook for video key: ${key}`);
+
+    // This actor returns: { id, url, transcript }
+    // transcript is in WebVTT format
+    const caption = firstItem.caption || firstItem.text || firstItem.description || null;
+    const transcript = firstItem.transcript || firstItem.subtitles || firstItem.videoTranscript || null;
+
+    console.log(`[${requestId}] Extracted data:`, {
+      hasCaption: !!caption,
+      hasTranscript: !!transcript,
+      captionLength: caption?.length,
+      transcriptLength: transcript?.length,
     });
 
     // Validate we have at least caption or transcript
-    if (!payload.caption && !payload.transcript) {
-      console.error(`[${requestId}] ✗ No caption or transcript in payload`);
+    if (!caption && !transcript) {
+      console.error(`[${requestId}] ✗ No caption or transcript in dataset`);
 
       // Initialize Supabase to update cache with error
       const supabaseUrl = Deno.env.get("SUPABASE_URL");
@@ -178,8 +275,8 @@ Deno.serve(async (req) => {
     try {
       const normalizeResult = await normalizeRecipe(
         {
-          caption: payload.caption,
-          transcript: payload.transcript,
+          caption,
+          transcript,
           source_url: payload.source_url || `https://www.tiktok.com/video/${key}`,
           video_id: key,
         },
@@ -195,9 +292,10 @@ Deno.serve(async (req) => {
           value: normalizeResult.recipe,
           meta: {
             source_url: payload.source_url,
-            caption: payload.caption,
-            transcript: payload.transcript,
+            caption,
+            transcript,
             actorRunId: payload.actorRunId,
+            datasetId: payload.datasetId,
             model: normalizeResult.model,
             source: "transcript",
             timings: {

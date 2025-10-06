@@ -134,4 +134,5 @@ export interface ApifyWebhookPayload {
   transcript?: string;
   source_url?: string;
   actorRunId?: string;
+  datasetId?: string;
 }

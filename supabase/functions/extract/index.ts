@@ -269,8 +269,18 @@ Deno.serve(async (req) => {
     const apifyActorId = Deno.env.get("APIFY_TIKTOK_TRANSCRIPT_ACTOR_ID");
     const webhookSecret = Deno.env.get("APIFY_WEBHOOK_SECRET");
 
+    console.log(`[${requestId}] Apify env vars check:`, {
+      hasApifyToken: !!apifyToken,
+      hasApifyActorId: !!apifyActorId,
+      hasWebhookSecret: !!webhookSecret,
+    });
+
     if (!apifyToken || !apifyActorId || !webhookSecret) {
-      console.error(`[${requestId}] ✗ Missing Apify configuration`);
+      console.error(`[${requestId}] ✗ Missing Apify configuration:`, {
+        APIFY_TOKEN: apifyToken ? "present" : "MISSING",
+        APIFY_TIKTOK_TRANSCRIPT_ACTOR_ID: apifyActorId ? "present" : "MISSING",
+        APIFY_WEBHOOK_SECRET: webhookSecret ? "present" : "MISSING",
+      });
       return new Response(
         JSON.stringify({ error: "Server configuration error" }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
