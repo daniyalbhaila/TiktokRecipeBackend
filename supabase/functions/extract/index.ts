@@ -4,8 +4,9 @@ import { isValidTikTokUrl } from "../_shared/utils/tiktok.ts";
 import { fetchOEmbed, extractCaption, shouldNormalizeFromCaption } from "../_shared/utils/oembed.ts";
 import { normalizeRecipe } from "../_shared/utils/openai.ts";
 import { triggerApifyActor, buildWebhookUrl } from "../_shared/utils/apify.ts";
-import { handleCorsPreflight, validateMethod, jsonResponse, jsonError } from "../_shared/utils/http.ts";
+import { handleCorsPreflight, validateMethod, jsonResponse, jsonError, CORS_HEADERS } from "../_shared/utils/http.ts";
 import { getSupabaseClient, getRequiredEnv } from "../_shared/utils/supabase.ts";
+import { createClient } from "@supabase/supabase-js";
 
 /**
  * POST /extract
@@ -57,7 +58,7 @@ Deno.serve(async (req) => {
           error: "Invalid TikTok URL",
           message: "Please provide a valid TikTok video URL",
         }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
@@ -73,7 +74,7 @@ Deno.serve(async (req) => {
           error: "Invalid TikTok video",
           message: "Could not fetch video metadata from TikTok",
         }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
@@ -86,7 +87,7 @@ Deno.serve(async (req) => {
           error: "Invalid video data",
           message: "TikTok video ID not found in response",
         }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
@@ -100,7 +101,7 @@ Deno.serve(async (req) => {
       console.error(`[${requestId}] ✗ Missing Supabase credentials`);
       return new Response(
         JSON.stringify({ error: "Server configuration error" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
@@ -118,7 +119,7 @@ Deno.serve(async (req) => {
       console.error(`[${requestId}] ✗ Cache lookup error:`, cacheError);
       return new Response(
         JSON.stringify({ error: "Database error", details: cacheError.message }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
@@ -135,7 +136,7 @@ Deno.serve(async (req) => {
 
       return new Response(
         JSON.stringify(response),
-        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
@@ -151,7 +152,7 @@ Deno.serve(async (req) => {
 
       return new Response(
         JSON.stringify(response),
-        { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 202, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
@@ -168,7 +169,7 @@ Deno.serve(async (req) => {
 
       return new Response(
         JSON.stringify(response),
-        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
@@ -188,7 +189,7 @@ Deno.serve(async (req) => {
         console.error(`[${requestId}] ✗ Missing OPENAI_API_KEY`);
         return new Response(
           JSON.stringify({ error: "Server configuration error" }),
-          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
         );
       }
 
@@ -249,7 +250,7 @@ Deno.serve(async (req) => {
 
         return new Response(
           JSON.stringify(response),
-          { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          { status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
         );
       } catch (openaiError) {
         console.error(`[${requestId}] ✗ OpenAI normalization failed:`, openaiError);
@@ -278,7 +279,7 @@ Deno.serve(async (req) => {
       });
       return new Response(
         JSON.stringify({ error: "Server configuration error" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
@@ -332,7 +333,7 @@ Deno.serve(async (req) => {
 
       return new Response(
         JSON.stringify(response),
-        { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 202, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     } catch (apifyError) {
       console.error(`[${requestId}] ✗ Apify trigger failed:`, apifyError);
@@ -363,7 +364,7 @@ Deno.serve(async (req) => {
           error: "Failed to start extraction",
           message: apifyError instanceof Error ? apifyError.message : "Unknown error",
         }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
   } catch (error) {
@@ -375,7 +376,7 @@ Deno.serve(async (req) => {
         error: "Internal server error",
         message: error instanceof Error ? error.message : "Unknown error",
       }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
     );
   }
 });
