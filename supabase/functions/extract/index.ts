@@ -1,8 +1,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import type { ExtractRequest, ExtractResponse, CacheStatus } from "../_shared/types.ts";
-import { isValidTikTokUrl } from "../_shared/utils/tiktok.ts";
-import { fetchOEmbed, extractCaption, shouldNormalizeFromCaption } from "../_shared/utils/oembed.ts";
-import { normalizeRecipe } from "../_shared/utils/openai.ts";
+import { parseVideoUrl } from "../_shared/utils/urlParsing.ts";
+import { fetchOEmbed as fetchTikTokOEmbed, extractCaption, shouldNormalizeFromCaption } from "../_shared/utils/tiktokOembed.ts";
+import { fetchYouTubeOEmbed, getVideoIdFromOEmbed } from "../_shared/utils/youtubeOembed.ts";
+import { normalizeRecipe, normalizeYouTubeVideo } from "../_shared/utils/aiProvider.ts";
 import { triggerApifyActor, buildWebhookUrl } from "../_shared/utils/apify.ts";
 import { handleCorsPreflight, validateMethod, jsonResponse, jsonError, CORS_HEADERS } from "../_shared/utils/http.ts";
 import { getSupabaseClient, getRequiredEnv } from "../_shared/utils/supabase.ts";
@@ -50,22 +51,196 @@ Deno.serve(async (req) => {
       return jsonError("Missing 'url' field in request body", 400);
     }
 
-    // Quick validation: is it a TikTok URL?
-    if (!isValidTikTokUrl(body.url)) {
-      console.log(`[${requestId}] ✗ Invalid TikTok URL: ${body.url}`);
+    // Quick validation: is it a TikTok or YouTube URL?
+    const parsedUrl = parseVideoUrl(body.url);
+    if (!parsedUrl) {
+      console.log(`[${requestId}] ✗ Invalid video URL: ${body.url}`);
       return new Response(
         JSON.stringify({
-          error: "Invalid TikTok URL",
-          message: "Please provide a valid TikTok video URL",
+          error: "Invalid video URL",
+          message: "Please provide a valid TikTok or YouTube video URL",
         }),
         { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
       );
     }
 
-    console.log(`[${requestId}] ✓ Valid TikTok URL, fetching oEmbed for canonical ID`);
+    console.log(`[${requestId}] ✓ Valid ${parsedUrl.platform} URL, fetching metadata`);
+
+    // Initialize Supabase client early (needed for both paths)
+    const supabaseUrl = Deno.env.get("SUPABASE_URL");
+    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+    if (!supabaseUrl || !supabaseServiceKey) {
+      console.error(`[${requestId}] ✗ Missing Supabase credentials`);
+      return new Response(
+        JSON.stringify({ error: "Server configuration error" }),
+        { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+      );
+    }
+
+    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+    // ========== YOUTUBE PATH ==========
+    if (parsedUrl.platform === "youtube") {
+      console.log(`[${requestId}] YouTube path: fetching oEmbed for video ID extraction`);
+
+      const youtubeOEmbed = await fetchYouTubeOEmbed(body.url);
+      if (!youtubeOEmbed) {
+        console.log(`[${requestId}] ✗ Could not fetch YouTube oEmbed data`);
+        return new Response(
+          JSON.stringify({
+            error: "Invalid YouTube video",
+            message: "Could not fetch video metadata from YouTube",
+          }),
+          { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+        );
+      }
+
+      const youtubeVideoId = getVideoIdFromOEmbed(youtubeOEmbed);
+      if (!youtubeVideoId) {
+        console.log(`[${requestId}] ✗ Could not extract video ID from YouTube oEmbed`);
+        return new Response(
+          JSON.stringify({
+            error: "Invalid video data",
+            message: "YouTube video ID not found in response",
+          }),
+          { status: 400, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+        );
+      }
+
+      console.log(`[${requestId}] ✓ YouTube video ID: ${youtubeVideoId}`);
+
+      // Check cache
+      const { data: cached, error: cacheError } = await supabase
+        .from("cache")
+        .select("*")
+        .eq("key", youtubeVideoId)
+        .maybeSingle();
+
+      if (cacheError) {
+        console.error(`[${requestId}] ✗ Cache lookup error:`, cacheError);
+        return new Response(
+          JSON.stringify({ error: "Database error", details: cacheError.message }),
+          { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+        );
+      }
+
+      // Return cached result if available (and not forcing refresh)
+      if (cached && cached.status === "READY" && !body.force) {
+        const elapsed = performance.now() - startTime;
+        console.log(`[${requestId}] ✓ Cache hit (READY) - returning cached recipe (${elapsed.toFixed(0)}ms)`);
+
+        const response: ExtractResponse = {
+          key: youtubeVideoId,
+          status: "READY",
+          value: cached.value,
+        };
+
+        return new Response(
+          JSON.stringify(response),
+          { status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+        );
+      }
+
+      // Process YouTube video with Gemini video analysis
+      console.log(`[${requestId}] YouTube: sending video to Gemini for analysis`);
+
+      try {
+        const normalizeResult = await normalizeYouTubeVideo(
+          body.url,
+          youtubeVideoId,
+          {
+            title: youtubeOEmbed.title,
+            author: youtubeOEmbed.author_name,
+            author_url: youtubeOEmbed.author_url,
+            thumbnail_url: youtubeOEmbed.thumbnail_url,
+            thumbnail_width: youtubeOEmbed.thumbnail_width,
+            thumbnail_height: youtubeOEmbed.thumbnail_height,
+          }
+        );
+
+        // Store in cache as READY
+        const { error: upsertError } = await supabase
+          .from("cache")
+          .upsert({
+            key: youtubeVideoId,
+            status: "READY" as CacheStatus,
+            value: normalizeResult.recipe,
+            meta: {
+              source_url: body.url,
+              model: normalizeResult.model,
+              ai_provider: normalizeResult.provider,
+              platform: "youtube",
+              source: "video_analysis",
+              timings: {
+                gemini_ms: normalizeResult.elapsed_ms,
+              },
+              author: youtubeOEmbed.author_name,
+              author_url: youtubeOEmbed.author_url,
+              thumbnail_url: youtubeOEmbed.thumbnail_url,
+              thumbnail_width: youtubeOEmbed.thumbnail_width,
+              thumbnail_height: youtubeOEmbed.thumbnail_height,
+            },
+          });
+
+        if (upsertError) {
+          console.error(`[${requestId}] ✗ Error storing to cache:`, upsertError);
+        } else {
+          console.log(`[${requestId}] ✓ Stored READY recipe to cache`);
+        }
+
+        const elapsed = performance.now() - startTime;
+        console.log(`[${requestId}] ✓ YouTube video analysis complete - returning READY (${elapsed.toFixed(0)}ms)`);
+
+        const response: ExtractResponse = {
+          key: youtubeVideoId,
+          status: "READY",
+          value: normalizeResult.recipe,
+        };
+
+        return new Response(
+          JSON.stringify(response),
+          { status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+        );
+      } catch (geminiError) {
+        console.error(`[${requestId}] ✗ Gemini video analysis failed:`, geminiError);
+
+        // Store FAILED status
+        const { error: failError } = await supabase
+          .from("cache")
+          .upsert({
+            key: youtubeVideoId,
+            status: "FAILED" as CacheStatus,
+            error: {
+              type: "gemini_video_error",
+              message: geminiError instanceof Error ? geminiError.message : "Failed to analyze YouTube video",
+              raw: geminiError,
+            },
+            meta: {
+              source_url: body.url,
+              platform: "youtube",
+            },
+          });
+
+        if (failError) {
+          console.error(`[${requestId}] ✗ Error storing FAILED to cache:`, failError);
+        }
+
+        return new Response(
+          JSON.stringify({
+            error: "Failed to analyze video",
+            message: geminiError instanceof Error ? geminiError.message : "Unknown error",
+          }),
+          { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
+    // ========== TIKTOK PATH ==========
+    console.log(`[${requestId}] TikTok path: fetching oEmbed for caption and video ID`);
 
     // Fetch oEmbed data first to get canonical embed_product_id
-    const oembedData = await fetchOEmbed(body.url);
+    const oembedData = await fetchTikTokOEmbed(body.url);
 
     if (!oembedData) {
       console.log(`[${requestId}] ✗ Could not fetch oEmbed data for URL`);
@@ -93,21 +268,7 @@ Deno.serve(async (req) => {
 
     console.log(`[${requestId}] ✓ Canonical video ID from oEmbed: ${videoId}`);
 
-    // Initialize Supabase client with service role
-    const supabaseUrl = Deno.env.get("SUPABASE_URL");
-    const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-    if (!supabaseUrl || !supabaseServiceKey) {
-      console.error(`[${requestId}] ✗ Missing Supabase credentials`);
-      return new Response(
-        JSON.stringify({ error: "Server configuration error" }),
-        { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-      );
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-    // Check cache
+    // Check cache (Supabase client initialized earlier)
     console.log(`[${requestId}] Checking cache for key: ${videoId}`);
     const { data: cached, error: cacheError } = await supabase
       .from("cache")
@@ -182,16 +343,7 @@ Deno.serve(async (req) => {
 
     // Try caption-based normalization if caption looks like a recipe
     if (caption && shouldNormalizeFromCaption(caption)) {
-      console.log(`[${requestId}] Caption path: attempting immediate normalization`);
-
-      const openaiKey = Deno.env.get("OPENAI_API_KEY");
-      if (!openaiKey) {
-        console.error(`[${requestId}] ✗ Missing OPENAI_API_KEY`);
-        return new Response(
-          JSON.stringify({ error: "Server configuration error" }),
-          { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
-        );
-      }
+      console.log(`[${requestId}] Caption path: attempting immediate normalization with ${parsedUrl.platform} provider`);
 
       try {
         const normalizeResult = await normalizeRecipe(
@@ -206,7 +358,7 @@ Deno.serve(async (req) => {
             thumbnail_width: oembedData.thumbnail_width,
             thumbnail_height: oembedData.thumbnail_height,
           },
-          openaiKey
+          parsedUrl.platform
         );
 
         // Store in cache as READY
@@ -220,9 +372,13 @@ Deno.serve(async (req) => {
               source_url: body.url,
               caption,
               model: normalizeResult.model,
+              ai_provider: normalizeResult.provider,
+              platform: parsedUrl.platform,
               source: "caption",
-              timings: {
+              timings: normalizeResult.provider === "openai" ? {
                 openai_ms: normalizeResult.elapsed_ms,
+              } : {
+                gemini_ms: normalizeResult.elapsed_ms,
               },
               author,
               author_url: oembedData.author_url,
@@ -240,7 +396,7 @@ Deno.serve(async (req) => {
         }
 
         const elapsed = performance.now() - startTime;
-        console.log(`[${requestId}] ✓ Caption path successful - returning READY (${elapsed.toFixed(0)}ms)`);
+        console.log(`[${requestId}] ✓ Caption path successful with ${normalizeResult.provider} - returning READY (${elapsed.toFixed(0)}ms)`);
 
         const response: ExtractResponse = {
           key: videoId,
@@ -252,8 +408,8 @@ Deno.serve(async (req) => {
           JSON.stringify(response),
           { status: 200, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
         );
-      } catch (openaiError) {
-        console.error(`[${requestId}] ✗ OpenAI normalization failed:`, openaiError);
+      } catch (aiError) {
+        console.error(`[${requestId}] ✗ AI normalization failed:`, aiError);
         // Fall through to Apify path
       }
     }

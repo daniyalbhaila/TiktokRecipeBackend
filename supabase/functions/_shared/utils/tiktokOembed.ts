@@ -3,9 +3,7 @@
  */
 
 import type { OEmbedResponse } from "../types.ts";
-import { MIN_RECIPE_CAPTION_LENGTH, MIN_RECIPE_KEYWORD_MATCHES } from "../constants.ts";
-
-const TIKTOK_OEMBED_ENDPOINT = "https://www.tiktok.com/oembed";
+import { MIN_RECIPE_CAPTION_LENGTH, MIN_RECIPE_KEYWORD_MATCHES, TIKTOK_OEMBED_ENDPOINT } from "../constants.ts";
 
 /**
  * Fetches oEmbed data from TikTok for a given video URL

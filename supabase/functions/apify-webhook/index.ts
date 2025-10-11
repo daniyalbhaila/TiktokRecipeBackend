@@ -1,8 +1,9 @@
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "@supabase/supabase-js";
 import type { ApifyWebhookPayload, CacheMeta, CacheStatus } from "../_shared/types.ts";
-import { normalizeRecipe } from "../_shared/utils/openai.ts";
+import { normalizeRecipe } from "../_shared/utils/aiProvider.ts";
 import { verifyWebhookSecret } from "../_shared/utils/apify.ts";
+import { parseVideoUrl } from "../_shared/utils/urlParsing.ts";
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
@@ -22,12 +23,13 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * POST /apify-webhook?key=VIDEO_ID&secret=WEBHOOK_SECRET
  *
  * Receives callback from Apify when TikTok scraping is complete.
+ * Note: Only used for TikTok videos (YouTube uses direct Gemini video analysis)
  *
  * Flow:
  * 1. Verify webhook secret
  * 2. Extract key from query params
  * 3. Parse caption/transcript from payload
- * 4. Normalize with OpenAI
+ * 4. Normalize with AI provider (OpenAI or Gemini text-based)
  * 5. Update cache table: PENDING → READY (or FAILED)
  */
 Deno.serve(async (req) => {
@@ -322,31 +324,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // Get OpenAI API key
-    const openaiKey = Deno.env.get("OPENAI_API_KEY");
-    if (!openaiKey) {
-      console.error(`[${requestId}] ✗ Missing OPENAI_API_KEY`);
-
-      await supabase
-        .from("cache")
-        .upsert({
-          key,
-          status: "FAILED" as CacheStatus,
-          error: {
-            type: "config_error",
-            message: "OpenAI API key not configured",
-          },
-        });
-
-      return new Response(
-        JSON.stringify({ error: "Server configuration error" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Normalize recipe with OpenAI
-    console.log(`[${requestId}] Normalizing recipe with OpenAI...`);
-
+    // Determine the platform from the source URL
     const resolvedSourceUrl =
       payload.source_url ||
       asString(firstItemRecord["url"]) ||
@@ -354,6 +332,12 @@ Deno.serve(async (req) => {
       asString(firstItemRecord["href"]) ||
       existingMeta.source_url ||
       `https://www.tiktok.com/video/${key}`;
+
+    const parsedUrl = parseVideoUrl(resolvedSourceUrl);
+    const platform = parsedUrl?.platform || existingMeta.platform || "tiktok"; // Default to tiktok for backwards compatibility
+
+    console.log(`[${requestId}] Determined platform: ${platform} from URL: ${resolvedSourceUrl}`);
+    console.log(`[${requestId}] Normalizing recipe with ${platform} AI provider...`);
 
     const author = datasetAuthor || existingMeta.author;
     const authorUrl = datasetAuthorUrl || existingMeta.author_url;
@@ -376,7 +360,7 @@ Deno.serve(async (req) => {
           thumbnail_width: thumbnailWidth,
           thumbnail_height: thumbnailHeight,
         },
-        openaiKey
+        platform
       );
 
       const updatedMeta: CacheMeta = {
@@ -387,6 +371,8 @@ Deno.serve(async (req) => {
         actorRunId: payload.actorRunId || existingMeta.actorRunId,
         datasetId: datasetId || existingMeta.datasetId,
         model: normalizeResult.model,
+        ai_provider: normalizeResult.provider,
+        platform: platform,
         source: "transcript",
         author,
         author_url: authorUrl,
@@ -396,7 +382,11 @@ Deno.serve(async (req) => {
         thumbnail_height: thumbnailHeight,
         timings: {
           ...existingMeta.timings,
-          openai_ms: normalizeResult.elapsed_ms,
+          ...(normalizeResult.provider === "openai" ? {
+            openai_ms: normalizeResult.elapsed_ms,
+          } : {
+            gemini_ms: normalizeResult.elapsed_ms,
+          }),
         },
       };
 
@@ -428,8 +418,8 @@ Deno.serve(async (req) => {
         { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
 
-    } catch (openaiError) {
-      console.error(`[${requestId}] ✗ OpenAI normalization failed:`, openaiError);
+    } catch (aiError) {
+      console.error(`[${requestId}] ✗ AI normalization failed:`, aiError);
 
       // Store FAILED status
       await supabase
@@ -439,21 +429,22 @@ Deno.serve(async (req) => {
           status: "FAILED" as CacheStatus,
           error: {
             type: "normalization_error",
-            message: openaiError instanceof Error ? openaiError.message : "OpenAI normalization failed",
-            raw: openaiError,
+            message: aiError instanceof Error ? aiError.message : "AI normalization failed",
+            raw: aiError,
           },
           meta: {
             source_url: payload.source_url,
             caption: payload.caption,
             transcript: payload.transcript,
             actorRunId: payload.actorRunId,
+            platform: platform,
           },
         });
 
       return new Response(
         JSON.stringify({
           error: "Normalization failed",
-          message: openaiError instanceof Error ? openaiError.message : "Unknown error",
+          message: aiError instanceof Error ? aiError.message : "Unknown error",
         }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );

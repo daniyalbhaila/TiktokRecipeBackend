@@ -85,10 +85,13 @@ export interface CacheMeta {
   timings?: {
     oembed_ms?: number;
     openai_ms?: number;
+    gemini_ms?: number;
     apify_ms?: number;
   };
   model?: string;
+  ai_provider?: "openai" | "gemini"; // Which AI provider was used
   source?: "caption" | "transcript";
+  platform?: "tiktok" | "youtube"; // Which platform the video is from
   author?: string;
   author_url?: string;
   creator_handle?: string;

@@ -4,19 +4,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Supabase backend project for a TikTok recipe application. The project uses Supabase Edge Functions (Deno runtime) to handle serverless API endpoints.
+This is a Supabase backend project for a recipe extraction application. The project uses Supabase Edge Functions (Deno runtime) to handle serverless API endpoints.
 
-**Core Product Flow**: User pastes a TikTok link → backend extracts recipe from caption/transcript → returns standardized recipe card with ingredients, steps, and nutrition info.
+**Core Product Flow**: User pastes a TikTok or YouTube link → backend extracts recipe from caption/transcript → returns standardized recipe card with ingredients, steps, and nutrition info.
+
+### Supported Platforms
+
+- **TikTok**: Full support with oEmbed and Apify scraping
+- **YouTube**: Full support with configurable AI provider (always uses Gemini)
 
 ### SLC (Simple Lovable Complete) Scope
 
 **✅ In Scope (MVP/SLC)**
-- Paste TikTok link → return clean recipe card
+- Paste TikTok or YouTube link → return clean recipe card
 - Extract from caption → transcript fallback → error if neither available (no OCR)
 - Standardized ingredients + steps format
 - Nutrition info (stubbed macros acceptable for MVP)
 - Error handling with friendly user messages
 - Basic caching for instant repeat requests
+- Flexible AI provider (OpenAI or Gemini) based on platform and configuration
 
 **❌ Out of Scope (Post-MVP)**
 - OCR for on-screen text / carousel images
@@ -29,21 +35,37 @@ This is a Supabase backend project for a TikTok recipe application. The project 
 ### Overall Flow
 
 ```
-Clients (web/app/CLI) → /extract → Cache check → oEmbed fast path → Apify slow path (webhook) → Normalizer (OpenAI) → Cache READY → /result read
+Clients (web/app/CLI) → /extract → Cache check → oEmbed fast path → Apify slow path (webhook) → Normalizer (OpenAI/Gemini) → Cache READY → /result read
 ```
 
 **Why this architecture?** Keeps code tiny, zero-ops, cheap, and resilient by splitting sync/async work and using cache as both job state + idempotency layer.
+
+### AI Provider Selection
+
+The system supports both OpenAI and Google Gemini for recipe normalization:
+
+**Provider Rules:**
+- **YouTube videos**: ALWAYS use Gemini (requires `GEMINI_API_KEY`)
+- **TikTok videos**: Configurable via `AI_PROVIDER` environment variable
+  - `AI_PROVIDER=gemini` → Use Gemini (requires `GEMINI_API_KEY`)
+  - `AI_PROVIDER=openai` or not set → Use OpenAI (requires `OPENAI_API_KEY`)
+
+**Shared System Prompt**: Both providers use the same system prompt (`RECIPE_SYSTEM_PROMPT` in `_shared/utils/openai.ts`) to ensure consistent recipe extraction quality across providers.
 
 ### Supabase Edge Functions (Stateless Glue)
 
 The project contains three edge functions in `supabase/functions/`:
 
-- **`POST /extract`** - Entry point. Validates URL, computes key (TikTok video_id), checks cache
+- **`POST /extract`** - Entry point. Validates TikTok/YouTube URL, computes key (video_id), checks cache
+  - Supports both TikTok and YouTube URLs
   - If cached READY → return value immediately
-  - Else try oEmbed (caption). If caption looks recipe-ish → normalize now
+  - Else try oEmbed (caption). If caption looks recipe-ish → normalize now with appropriate AI provider
   - Otherwise → start Apify actor with webhook, return PENDING
+  - Uses `aiProvider.ts` to route to OpenAI or Gemini based on platform
 
-- **`POST /apify-webhook`** - Receives `{key, caption?, transcript?}` from Apify. Calls OpenAI once to normalize. Upserts READY
+- **`POST /apify-webhook`** - Receives `{key, caption?, transcript?}` from Apify. Calls AI provider to normalize. Upserts READY
+  - Determines platform from source URL
+  - Routes to appropriate AI provider (OpenAI or Gemini)
 
 - **`GET /result?key=...`** - Returns `{status, value?, error?}` from cache (for polling)
 
@@ -59,10 +81,10 @@ All functions:
 
 ```sql
 create table public.cache (
-  key         text primary key,                    -- TikTok video_id (idempotency key)
+  key         text primary key,                    -- Video ID (TikTok or YouTube) - idempotency key
   status      text not null check (status in ('PENDING','READY','FAILED')),
   value       jsonb,                               -- normalized recipe JSON when READY
-  meta        jsonb,                               -- {source_url, caption?, transcript?, actorRunId?, timings?, model?}
+  meta        jsonb,                               -- {source_url, caption?, transcript?, actorRunId?, timings?, model?, ai_provider?, platform?}
   error       jsonb,                               -- {type, message, code?, raw?}
   updated_at  timestamptz default now()
 );
@@ -72,7 +94,9 @@ create table public.cache (
 - `key`: Deduplication + idempotency (same video never reprocessed unless forced)
 - `status`: Simple FSM (PENDING→READY/FAILED)
 - `value`: Final, canonical recipe JSON your frontend consumes
-- `meta`: Diagnostics/observability (timings, inputs, model used)
+- `meta`: Diagnostics/observability (timings, inputs, model used, AI provider, platform)
+  - `ai_provider`: "openai" or "gemini" - which AI was used
+  - `platform`: "tiktok" or "youtube" - which platform the video is from
 - `error`: Failure details for UX + debugging
 - `updated_at`: Ops & TTL cleanup
 
@@ -86,17 +110,23 @@ create table public.cache (
 **Apify** - Async scraping (heavy lifting: browser automation, transcript extraction)
 - Calls back via webhook so edge functions never block
 - Triggered when oEmbed caption is insufficient
+- Supports both TikTok and YouTube video scraping
 
-**OpenAI** - Normalizer
-- Deterministic, single call
+**AI Providers** - Recipe Normalization
+- **OpenAI (GPT-4o-mini)**: Default for TikTok, optional for all platforms
+- **Google Gemini (2.0 Flash)**: Required for YouTube, optional for TikTok
+- Both use identical system prompts for consistent quality
+- Deterministic, single call per video
 - Converts caption/transcript → strict recipe JSON
 
 ### Security & Secrets
 
 Secrets stored in Supabase → Settings → Secrets:
-- `OPENAI_API_KEY`
+- `OPENAI_API_KEY` - Required when using OpenAI (TikTok default)
+- `GEMINI_API_KEY` - Required for YouTube videos and optional for TikTok
+- `AI_PROVIDER` - Optional, set to "gemini" or "openai" (defaults to "openai" for TikTok)
 - `APIFY_TOKEN`
-- `WEBHOOK_SECRET`
+- `APIFY_WEBHOOK_SECRET`
 
 No RLS on cache table (server-owned). Functions use service role client.
 JWT verification enabled on functions for access control.
